@@ -1,0 +1,9 @@
+[package]
+name = "seal"
+version = "0.1.0"
+authors = ["William Speirs <bill.speirs@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+libflate = "0.1"
+ring = "0.16"
