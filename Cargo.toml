@@ -7,3 +7,4 @@ edition = "2018"
 [dependencies]
 libflate = "0.1"
 ring = "0.16"
+zstd = "0.5"
