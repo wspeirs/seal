@@ -1,11 +1,9 @@
-extern crate libflate;
 extern crate ring;
 extern crate zstd;
 
 use std::io::{self, Read, BufReader, BufWriter, Cursor};
 use std::io::prelude::*;
 use std::fs::File;
-use libflate::gzip;
 
 
 use ring::aead::*;
