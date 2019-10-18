@@ -74,12 +74,30 @@ impl Sealer {
     }
 
     pub fn seal(&mut self, block: Vec<u8>) -> Vec<u8> {
-        let mut buff = block.clone();
+        let block_len = block.len() + AES_256_GCM.tag_len();
+        let mut buff = Vec::with_capacity(2 + block_len);
 
-        // resize our buffer to include the tag
-        buff.resize(block.len() + AES_256_GCM.tag_len(), 0);
+        println!("LEN: {}", block_len);
 
-        self.sealing_key.seal_in_place_append_tag(Aad::empty(), &mut buff);
+        // serialize the size of the block
+        buff.write_u16::<BE>(block_len as u16);
+
+        // resize our buffer to include space for the tag
+        buff.resize(2 + block_len, 0);
+
+        // copy in-place the block
+        buff[2..block.len()+2].copy_from_slice(&block);
+
+        println!("BUFF: {:?}", buff);
+
+        // encrypt and tag the block
+        let res = self.sealing_key.seal_in_place_separate_tag(Aad::empty(), &mut buff[2..block.len()+2]).expect("Error encrypting");
+
+        println!("BUFF: {:?}", buff);
+
+        buff[block.len()+2..].copy_from_slice(res.as_ref());
+
+        println!("BUFF: {:?}", buff);
 
         buff
     }
