@@ -134,12 +134,7 @@ impl Opener {
     }
 
     pub fn open(&mut self, mut block: Vec<u8>) -> Vec<u8> {
-        let block_len = block.as_slice().read_u32::<BE>().expect("Error reading block length");
-
-        println!("LEN: {}", block_len);
-
-        // need to parse out the length first
-        let res = self.opening_key.open_within(Aad::empty(), &mut block[4..(block_len+4) as usize], 0..).expect("Error opening");
+        let res = self.opening_key.open_within(Aad::empty(), &mut block, 0..).expect("Error opening");
 
         res.to_vec()
     }
@@ -181,11 +176,13 @@ mod tests {
 
         let orig_text = "here is my block".as_bytes().to_vec();
         let cipher_text = sealer.seal(orig_text.clone());
+        let cipher_text = cipher_text[4..].to_vec();
         let plain_text = opener.open(cipher_text);
         assert_eq!(orig_text, plain_text);
 
         let orig_text = "this is another block".as_bytes().to_vec();
         let cipher_text = sealer.seal(orig_text.clone());
+        let cipher_text = cipher_text[4..].to_vec();
         let plain_text = opener.open(cipher_text);
         assert_eq!(orig_text, plain_text);
     }

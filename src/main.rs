@@ -1,12 +1,20 @@
 extern crate clap;
 extern crate ring;
 extern crate zstd;
+#[macro_use]
+extern crate serde_derive;
+extern crate rmp_serde as rmps;
+extern crate serde;
 
 mod enc;
 
 use zstd::block::{Compressor, Decompressor};
 use clap::{Arg, App, SubCommand};
 use ring::rand::{SystemRandom, SecureRandom};
+use serde::{Deserialize, Serialize};
+use rmps::{Deserializer, Serializer};
+use rmp_serde::decode::from_read_ref;
+use byteorder::{ReadBytesExt, BE};
 
 use std::env;
 use std::io::*;
@@ -15,12 +23,16 @@ use std::fs;
 
 use enc::{Sealer, Opener};
 
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
 struct FileHeader {
-    version: u32,
-    salt: Vec<u8>,
+    version: String,
+    salt: String,
     nonce_seed: Vec<u8>,
     comments: HashMap<String, String>
 }
+
+const VERSION : &str = "1.0.0";
+const BLOCK_SIZE : usize = 4_048_576;
 
 
 fn main() {
@@ -98,10 +110,10 @@ fn main() {
             .open(output).expect("Error opening output file")))
     };
 
-    let mut buff = vec![0; 4_048_576];
     let mut rand = SystemRandom::new();
 
     if encrypt {
+        let mut buff = vec![0; BLOCK_SIZE];
         let salt = matches.value_of("salt").expect("Must supply salt!");
         let mut compress = Compressor::new();
         let mut nonce_seed = [0; 8];
@@ -109,6 +121,17 @@ fn main() {
         rand.fill(&mut nonce_seed);
 
         let mut sealer = Sealer::new(password, salt.as_bytes(), nonce_seed);
+
+        let file_header = FileHeader {
+            version: String::from(VERSION),
+            salt: String::from(salt),
+            nonce_seed: nonce_seed.to_vec(),
+            comments: HashMap::new()
+
+        };
+
+        // serialize and write out the file's header
+        file_header.serialize(&mut Serializer::new(&mut output_writer)).expect("Error writing file header");
 
         loop {
             let res = input_reader.read(&mut buff);
@@ -130,9 +153,32 @@ fn main() {
             output_writer.write_all(&ciphertext).expect("Error writing to output");
         }
     } else {
-        let mut decompress = Decompressor::new();
-//        let mut opener = Opener::new(password, salt.as_bytes(), [1,2,3,4,5,6,7,8]);
+        let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut input_reader)).expect("Error reading file header");
+//        let file_header  = from_read_ref(&input_reader).expect("Error reading file header");
 
+        let mut nonce_seed = [0; 8];
+
+        nonce_seed.copy_from_slice(file_header.nonce_seed.as_slice());
+
+        let mut opener = Opener::new(password, file_header.salt.as_bytes(), nonce_seed);
+        let mut decompress = Decompressor::new();
+
+        loop {
+            let block_size = input_reader.read_u32::<BE>().expect("Error reading block size");
+
+            let mut buff = vec![0; block_size as usize];
+            let res = input_reader.read_exact(&mut buff);
+
+            if let Err(e) = res {
+                eprintln!("Error reading input: {:?}", e);
+                break;
+            }
+
+            let plaintext = opener.open(buff);
+            let plaintext = decompress.decompress(&plaintext, 2).expect("Error decompressing input");
+
+            output_writer.write_all(&plaintext).expect("Error writing to output");
+        }
     }
 
 }
