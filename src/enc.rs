@@ -2,7 +2,7 @@ use ring::pbkdf2::{derive, PBKDF2_HMAC_SHA512};
 use ring::aead::{AES_256_GCM, NonceSequence, Nonce, BoundKey, UnboundKey, SealingKey, Aad, OpeningKey};
 use ring::error::Unspecified;
 
-use byteorder::{ReadBytesExt, WriteBytesExt, BE};
+use byteorder::{WriteBytesExt, BE};
 
 use std::num::NonZeroU32;
 
@@ -77,10 +77,10 @@ impl Sealer {
         let block_len = block.len() + AES_256_GCM.tag_len();
         let mut buff = Vec::with_capacity(4 + block_len);
 
-        println!("LEN: {}", block_len);
+        eprintln!("BLOCK_LEN: {}", block_len);
 
         // serialize the size of the block
-        buff.write_u32::<BE>(block_len as u32);
+        buff.write_u32::<BE>(block_len as u32).expect("Error writing block size");
 
         // resize our buffer to include space for the tag
         buff.resize(4 + block_len, 0);
@@ -88,16 +88,10 @@ impl Sealer {
         // copy in-place the block
         buff[4..block.len()+4].copy_from_slice(&block);
 
-        println!("BUFF: {:?}", buff);
-
         // encrypt and tag the block
         let res = self.sealing_key.seal_in_place_separate_tag(Aad::empty(), &mut buff[4..block.len()+4]).expect("Error encrypting");
 
-        println!("BUFF: {:?}", buff);
-
         buff[block.len()+4..].copy_from_slice(res.as_ref());
-
-        println!("BUFF: {:?}", buff);
 
         buff
     }
@@ -154,7 +148,7 @@ mod tests {
         cns.advance().unwrap();
         cns.advance().unwrap();
 
-        println!("{:?}", cns);
+        eprintln!("{:?}", cns);
     }
 
     #[test]
@@ -162,11 +156,11 @@ mod tests {
         let mut sealer = Sealer::new("my password", &[1,2,3,4,5,6,7,8,9,0], [1,2,3,4,5,6,7,8]);
         let block = "here is my block".as_bytes().to_vec();
 
-        println!("{:?}", block);
+        eprintln!("{:?}", block);
 
         let res = sealer.seal(block);
 
-        println!("{:?}", res);
+        eprintln!("{:?}", res);
     }
 
     #[test]

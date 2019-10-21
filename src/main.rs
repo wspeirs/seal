@@ -9,14 +9,12 @@ extern crate serde;
 mod enc;
 
 use zstd::block::{Compressor, Decompressor};
-use clap::{Arg, App, SubCommand};
+use clap::{Arg, App};
 use ring::rand::{SystemRandom, SecureRandom};
 use serde::{Deserialize, Serialize};
 use rmps::{Deserializer, Serializer};
-use rmp_serde::decode::from_read_ref;
-use byteorder::{ReadBytesExt, BE};
+use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 
-use std::env;
 use std::io::*;
 use std::collections::HashMap;
 use std::fs;
@@ -25,15 +23,114 @@ use enc::{Sealer, Opener};
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 struct FileHeader {
-    version: String,
     salt: String,
     nonce_seed: Vec<u8>,
     comments: HashMap<String, String>
 }
 
-const VERSION : &str = "1.0.0";
+const VERSION : u64 = 1;
 const BLOCK_SIZE : usize = 4_048_576;
 
+fn encrypt(mut input_reader : Box<dyn BufRead>, mut output_writer : &mut Box<dyn Write>, password : &str, salt : &str) {
+    let rand = SystemRandom::new();
+    let mut buff = vec![0; BLOCK_SIZE];
+    let mut compress = Compressor::new();
+    let mut nonce_seed = [0; 8];
+
+    rand.fill(&mut nonce_seed).expect("Error filling random nonce");
+
+    let mut sealer = Sealer::new(password, salt.as_bytes(), nonce_seed);
+
+    let file_header = FileHeader {
+        salt: String::from(salt),
+        nonce_seed: nonce_seed.to_vec(),
+        comments: HashMap::new()
+
+    };
+
+    // write out the version
+    // this is kept outside the FileHeader so we can read it in an independent way
+    output_writer.write_u64::<BE>(VERSION).expect("Error writing version");
+
+    // serialize and write out the file's header
+    file_header.serialize(&mut Serializer::new(&mut output_writer)).expect("Error writing file header");
+
+    loop {
+        let res = input_reader.read(&mut buff);
+
+        if let Err(e) = res {
+            eprintln!("Error reading input: {:?}", e);
+            break;
+        }
+
+        let amt = res.unwrap();
+
+        eprintln!("AMT: {}", amt);
+
+        if amt == 0 {
+            break;
+        }
+
+        let plaintext = compress.compress(&buff[0..amt], 2).expect("Error compressing input");
+
+        eprintln!("PT: {}", plaintext.len());
+
+        let ciphertext = sealer.seal(plaintext);
+
+        output_writer.write_all(&ciphertext).expect("Error writing to output");
+    }
+
+}
+
+fn decrypt(mut input_reader : Box<dyn BufRead>, output_writer : &mut Box<dyn Write>, password : &str) {
+    // read in the version of the file
+    let version = input_reader.read_u64::<BE>().expect("Unable to read version");
+
+    if version != VERSION {
+        panic!("Unsupported version: {}", version);
+    }
+
+    // read in the file header
+    let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut input_reader)).expect("Error reading file header");
+
+    eprintln!("SALT: {}", file_header.salt);
+
+    let mut nonce_seed = [0; 8];
+
+    nonce_seed.copy_from_slice(file_header.nonce_seed.as_slice());
+
+    let mut opener = Opener::new(password, file_header.salt.as_bytes(), nonce_seed);
+    let mut decompress = Decompressor::new();
+
+    loop {
+        let block_size = input_reader.read_u32::<BE>();
+
+        // we only get an error when we've reached the end of the buffer
+        if block_size.is_err() {
+            break;
+        }
+
+        let block_size = block_size.unwrap();
+
+        eprintln!("BLOCK_SIZE: {}", block_size);
+
+        let mut buff = vec![0; block_size as usize];
+        let res = input_reader.read_exact(&mut buff);
+
+        if let Err(e) = res {
+            eprintln!("Error reading input: {:?}", e);
+            break;
+        }
+
+        let plaintext = opener.open(buff);
+
+        eprintln!("PT: {}", plaintext.len());
+
+        let plaintext = decompress.decompress(&plaintext, BLOCK_SIZE).expect("Error decompressing input");
+
+        output_writer.write_all(&plaintext).expect("Error writing to output");
+    }
+}
 
 fn main() {
     let matches = App::new("Seal")
@@ -85,10 +182,9 @@ fn main() {
     let input = matches.value_of("input").unwrap_or("-");
     let output = matches.value_of("output").unwrap_or("-");
     let password = matches.value_of("password").expect("Must supply a password!");
-    let encrypt = matches.is_present("encrypt");
 
     // construct the input reader from either STDIN or from the file
-    let mut input_reader : Box<dyn BufRead> = if input == "-" {
+    let input_reader : Box<dyn BufRead> = if input == "-" {
         Box::new(BufReader::new(stdin()))
     } else {
         Box::new(BufReader::new(fs::OpenOptions::new()
@@ -110,75 +206,35 @@ fn main() {
             .open(output).expect("Error opening output file")))
     };
 
-    let mut rand = SystemRandom::new();
 
-    if encrypt {
-        let mut buff = vec![0; BLOCK_SIZE];
-        let salt = matches.value_of("salt").expect("Must supply salt!");
-        let mut compress = Compressor::new();
-        let mut nonce_seed = [0; 8];
+    if matches.is_present("decrypt") {
+        eprintln!("Attempting to decrypt...");
 
-        rand.fill(&mut nonce_seed);
-
-        let mut sealer = Sealer::new(password, salt.as_bytes(), nonce_seed);
-
-        let file_header = FileHeader {
-            version: String::from(VERSION),
-            salt: String::from(salt),
-            nonce_seed: nonce_seed.to_vec(),
-            comments: HashMap::new()
-
-        };
-
-        // serialize and write out the file's header
-        file_header.serialize(&mut Serializer::new(&mut output_writer)).expect("Error writing file header");
-
-        loop {
-            let res = input_reader.read(&mut buff);
-
-            if let Err(e) = res {
-                eprintln!("Error reading input: {:?}", e);
-                break;
-            }
-
-            let amt = res.unwrap();
-
-            if amt == 0 {
-                break;
-            }
-
-            let plaintext = compress.compress(&buff[0..amt], 2).expect("Error compressing input");
-            let ciphertext = sealer.seal(plaintext);
-
-            output_writer.write_all(&ciphertext).expect("Error writing to output");
-        }
+        decrypt(input_reader, &mut output_writer, password);
     } else {
-        let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut input_reader)).expect("Error reading file header");
-//        let file_header  = from_read_ref(&input_reader).expect("Error reading file header");
+        eprintln!("Attempting to encrypt...");
 
-        let mut nonce_seed = [0; 8];
+        let salt = matches.value_of("salt").expect("Must supply salt!");
 
-        nonce_seed.copy_from_slice(file_header.nonce_seed.as_slice());
-
-        let mut opener = Opener::new(password, file_header.salt.as_bytes(), nonce_seed);
-        let mut decompress = Decompressor::new();
-
-        loop {
-            let block_size = input_reader.read_u32::<BE>().expect("Error reading block size");
-
-            let mut buff = vec![0; block_size as usize];
-            let res = input_reader.read_exact(&mut buff);
-
-            if let Err(e) = res {
-                eprintln!("Error reading input: {:?}", e);
-                break;
-            }
-
-            let plaintext = opener.open(buff);
-            let plaintext = decompress.decompress(&plaintext, 2).expect("Error decompressing input");
-
-            output_writer.write_all(&plaintext).expect("Error writing to output");
-        }
+        encrypt(input_reader, &mut output_writer, password, salt);
     }
-
 }
+
+//#[cfg(test)]
+//mod tests {
+//    use std::io::{Read, Write, Cursor};
+//
+//    #[test]
+//    fn test_small_encrypt() {
+//        let input_buffer = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+//        let input_reader = Box::new(Cursor::new(input_buffer));
+//
+//        let output_buffer = Vec::new();
+//        let output_cursor = Cursor::new(Box::new(output_buffer));
+//        let mut output_writer : Box<dyn Write> = Box::new(output_cursor.clone());
+//
+//        crate::encrypt(input_reader, &mut output_writer, "password", "salt");
+//
+//        eprintln!("OUTPUT: {:?}", output_cursor.into_inner());
+//    }
+//}
