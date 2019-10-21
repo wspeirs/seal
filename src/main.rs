@@ -1,3 +1,7 @@
+#[macro_use]
+extern crate log;
+extern crate fern;
+extern crate chrono;
 extern crate clap;
 extern crate ring;
 extern crate zstd;
@@ -15,9 +19,10 @@ use serde::{Deserialize, Serialize};
 use rmps::{Deserializer, Serializer};
 use byteorder::{ReadBytesExt, WriteBytesExt, BE};
 
-use std::io::*;
+use std::io::{Read, Write, BufReader, BufRead, BufWriter, stdin, stdout};
 use std::collections::HashMap;
 use std::fs;
+use std::error::Error;
 
 use enc::{Sealer, Opener};
 
@@ -31,15 +36,15 @@ struct FileHeader {
 const VERSION : u64 = 1;
 const BLOCK_SIZE : usize = 4_048_576;
 
-fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, password : &str, salt : &str) {
+fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, password : &str, salt : &str) -> Result<(), Box<dyn Error>> {
     let rand = SystemRandom::new();
     let mut buff = vec![0; BLOCK_SIZE];
     let mut compress = Compressor::new();
     let mut nonce_seed = [0; 8];
 
-    rand.fill(&mut nonce_seed).expect("Error filling random nonce");
+    rand.fill(&mut nonce_seed).or_else(|e| { error!("Error reading random data"); Err(e) })?;
 
-    let mut sealer = Sealer::new(password, salt.as_bytes(), nonce_seed);
+    let mut sealer = Sealer::new(password, salt.as_bytes(), nonce_seed)?;
 
     let file_header = FileHeader {
         salt: String::from(salt),
@@ -50,56 +55,57 @@ fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, pa
 
     // write out the version
     // this is kept outside the FileHeader so we can read it in an independent way
-    output_writer.write_u64::<BE>(VERSION).expect("Error writing version");
+    output_writer.write_u64::<BE>(VERSION)?;
 
     // serialize and write out the file's header
-    file_header.serialize(&mut Serializer::new(&mut output_writer)).expect("Error writing file header");
+    file_header.serialize(&mut Serializer::new(&mut output_writer))?;
 
     loop {
         let res = input_reader.read(&mut buff);
 
-        if let Err(e) = res {
-            eprintln!("Error reading input: {:?}", e);
+        if res.is_err() {
             break;
         }
 
         let amt = res.unwrap();
 
-        dbg!("AMT: {}", amt);
+        debug!("AMT: {}", amt);
 
         if amt == 0 {
             break;
         }
 
-        let plaintext = compress.compress(&buff[0..amt], 2).expect("Error compressing input");
+        let plaintext = compress.compress(&buff[0..amt], 2).or_else(|e| { error!("Error compressing input"); Err(e) })?;
 
-        dbg!("PT: {}", plaintext.len());
+        debug!("PT: {}", plaintext.len());
 
         let ciphertext = sealer.seal(plaintext);
 
-        output_writer.write_all(&ciphertext).expect("Error writing to output");
+        output_writer.write_all(&ciphertext).or_else(|e| { error!("Error writing to output"); Err(e) })?;
     }
 
+    Ok( () )
 }
 
-fn decrypt(mut input_reader : impl Read, output_writer : &mut impl Write, password : &str) {
+fn decrypt(mut input_reader : impl Read, output_writer : &mut impl Write, password : &str) -> Result<(), Box<dyn Error>> {
     // read in the version of the file
-    let version = input_reader.read_u64::<BE>().expect("Unable to read version");
+    let version = input_reader.read_u64::<BE>().or_else(|e| { error!("Unable to read version"); Err(e) })?;
 
     if version != VERSION {
-        panic!("Unsupported version: {}", version);
+        error!("Unsupported file version: {}", version);
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unsupported file version")));
     }
 
     // read in the file header
     let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut input_reader)).expect("Error reading file header");
 
-    dbg!(file_header.salt.chars());
+    debug!("SALT: {}", file_header.salt);
 
     let mut nonce_seed = [0; 8];
 
     nonce_seed.copy_from_slice(file_header.nonce_seed.as_slice());
 
-    let mut opener = Opener::new(password, file_header.salt.as_bytes(), nonce_seed);
+    let mut opener = Opener::new(password, file_header.salt.as_bytes(), nonce_seed)?;
     let mut decompress = Decompressor::new();
 
     loop {
@@ -112,27 +118,28 @@ fn decrypt(mut input_reader : impl Read, output_writer : &mut impl Write, passwo
 
         let block_size = block_size.unwrap();
 
-        dbg!("BLOCK_SIZE: {}", block_size);
+        debug!("BLOCK_SIZE: {}", block_size);
 
         let mut buff = vec![0; block_size as usize];
         let res = input_reader.read_exact(&mut buff);
 
-        if let Err(e) = res {
-            eprintln!("Error reading input: {:?}", e);
+        if res.is_err() {
             break;
         }
 
         let plaintext = opener.open(buff);
 
-        dbg!("PT: {}", plaintext.len());
+        debug!("PT: {}", plaintext.len());
 
-        let plaintext = decompress.decompress(&plaintext, BLOCK_SIZE).expect("Error decompressing input");
+        let plaintext = decompress.decompress(&plaintext, BLOCK_SIZE).or_else(|e| { error!("Error decompressing input"); Err(e) })?;
 
-        output_writer.write_all(&plaintext).expect("Error writing to output");
+        output_writer.write_all(&plaintext).or_else(|e| { error!("Error writing to output"); Err(e) })?;
     }
+
+    Ok( () )
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("Seal")
         .version("1.0")
         .author("William Speirs <bill.speirs@gmail.com>")
@@ -178,10 +185,35 @@ fn main() {
             .help("Sets the level of verbosity"))
         .get_matches();
 
+    let verbosity = matches.occurrences_of("v");
+
+    let log_level = match verbosity {
+        0 => log::LevelFilter::Error,
+        1 => log::LevelFilter::Info,
+        2 => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Trace
+    };
+
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(log_level)
+        .chain(std::io::stderr())
+        .apply().expect("Error configuring logger");
 
     let input = matches.value_of("input").unwrap_or("-");
     let output = matches.value_of("output").unwrap_or("-");
-    let password = matches.value_of("password").expect("Must supply a password!");
+    let password = matches.value_of("password").or_else(|| { error!("Must supply a password!"); None }).unwrap();
+
+    debug!("INPUT: {}", input);
+    debug!("OUTPUT: {}", output);
 
     // construct the input reader from either STDIN or from the file
     let input_reader : Box<dyn BufRead> = if input == "-" {
@@ -191,7 +223,7 @@ fn main() {
             .read(true)
             .write(false)
             .create(false)
-            .open(input).expect("Error opening input file")))
+            .open(input).or_else(|e| { error!("Error opening input file"); Err(e) })?))
     };
 
     // construct the output writer from either STDOUT or from the file
@@ -203,21 +235,24 @@ fn main() {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(output).expect("Error opening output file")))
+            .open(output).or_else(|e| { error!("Error opening output file"); Err(e) })?))
     };
 
-
     if matches.is_present("decrypt") {
-        eprintln!("Attempting to decrypt...");
+        info!("Attempting to decrypt: {}", input);
 
-        decrypt(input_reader, &mut output_writer, password);
+        decrypt(input_reader, &mut output_writer, password)?;
     } else {
-        eprintln!("Attempting to encrypt...");
+        info!("Attempting to encrypt: {}", input);
 
-        let salt = matches.value_of("salt").expect("Must supply salt!");
+        let salt = matches.value_of("salt").or_else(|| { error!("Must supply salt!"); None }).unwrap();
 
-        encrypt(input_reader, &mut output_writer, password, salt);
+        debug!("SALT: {}", salt);
+
+        encrypt(input_reader, &mut output_writer, password, salt)?;
     }
+
+    Ok( () )
 }
 
 #[cfg(test)]
@@ -230,18 +265,18 @@ mod main_tests {
 
         let mut input_buffer = vec![0; buff_size];
 
-        rand.fill(&mut input_buffer);
+        rand.fill(&mut input_buffer).expect("Error reading random");
 
         let mut input_reader = Cursor::new(input_buffer);
 
         let mut encrypt_buffer = Vec::new();
 
-        crate::encrypt(&mut input_reader, &mut encrypt_buffer, "password", "salt");
+        crate::encrypt(&mut input_reader, &mut encrypt_buffer, "password", "salt").expect("Error encrypting");
 
         let encrypt_reader = Cursor::new(encrypt_buffer);
         let mut plaintext_buffer = Vec::new();
 
-        crate::decrypt(encrypt_reader, &mut plaintext_buffer, "password");
+        crate::decrypt(encrypt_reader, &mut plaintext_buffer, "password").expect("Error decrypting");
 
         assert_eq!(plaintext_buffer, input_reader.into_inner());
     }
