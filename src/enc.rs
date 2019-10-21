@@ -77,7 +77,7 @@ impl Sealer {
         let block_len = block.len() + AES_256_GCM.tag_len();
         let mut buff = Vec::with_capacity(4 + block_len);
 
-        eprintln!("BLOCK_LEN: {}", block_len);
+        dbg!("BLOCK_LEN: {}", block_len);
 
         // serialize the size of the block
         buff.write_u32::<BE>(block_len as u32).expect("Error writing block size");

@@ -31,7 +31,7 @@ struct FileHeader {
 const VERSION : u64 = 1;
 const BLOCK_SIZE : usize = 4_048_576;
 
-fn encrypt(mut input_reader : Box<dyn BufRead>, mut output_writer : &mut Box<dyn Write>, password : &str, salt : &str) {
+fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, password : &str, salt : &str) {
     let rand = SystemRandom::new();
     let mut buff = vec![0; BLOCK_SIZE];
     let mut compress = Compressor::new();
@@ -65,7 +65,7 @@ fn encrypt(mut input_reader : Box<dyn BufRead>, mut output_writer : &mut Box<dyn
 
         let amt = res.unwrap();
 
-        eprintln!("AMT: {}", amt);
+        dbg!("AMT: {}", amt);
 
         if amt == 0 {
             break;
@@ -73,7 +73,7 @@ fn encrypt(mut input_reader : Box<dyn BufRead>, mut output_writer : &mut Box<dyn
 
         let plaintext = compress.compress(&buff[0..amt], 2).expect("Error compressing input");
 
-        eprintln!("PT: {}", plaintext.len());
+        dbg!("PT: {}", plaintext.len());
 
         let ciphertext = sealer.seal(plaintext);
 
@@ -82,7 +82,7 @@ fn encrypt(mut input_reader : Box<dyn BufRead>, mut output_writer : &mut Box<dyn
 
 }
 
-fn decrypt(mut input_reader : Box<dyn BufRead>, output_writer : &mut Box<dyn Write>, password : &str) {
+fn decrypt(mut input_reader : impl Read, output_writer : &mut impl Write, password : &str) {
     // read in the version of the file
     let version = input_reader.read_u64::<BE>().expect("Unable to read version");
 
@@ -93,7 +93,7 @@ fn decrypt(mut input_reader : Box<dyn BufRead>, output_writer : &mut Box<dyn Wri
     // read in the file header
     let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut input_reader)).expect("Error reading file header");
 
-    eprintln!("SALT: {}", file_header.salt);
+    dbg!(file_header.salt.chars());
 
     let mut nonce_seed = [0; 8];
 
@@ -112,7 +112,7 @@ fn decrypt(mut input_reader : Box<dyn BufRead>, output_writer : &mut Box<dyn Wri
 
         let block_size = block_size.unwrap();
 
-        eprintln!("BLOCK_SIZE: {}", block_size);
+        dbg!("BLOCK_SIZE: {}", block_size);
 
         let mut buff = vec![0; block_size as usize];
         let res = input_reader.read_exact(&mut buff);
@@ -124,7 +124,7 @@ fn decrypt(mut input_reader : Box<dyn BufRead>, output_writer : &mut Box<dyn Wri
 
         let plaintext = opener.open(buff);
 
-        eprintln!("PT: {}", plaintext.len());
+        dbg!("PT: {}", plaintext.len());
 
         let plaintext = decompress.decompress(&plaintext, BLOCK_SIZE).expect("Error decompressing input");
 
@@ -220,21 +220,35 @@ fn main() {
     }
 }
 
-//#[cfg(test)]
-//mod tests {
-//    use std::io::{Read, Write, Cursor};
-//
-//    #[test]
-//    fn test_small_encrypt() {
-//        let input_buffer = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-//        let input_reader = Box::new(Cursor::new(input_buffer));
-//
-//        let output_buffer = Vec::new();
-//        let output_cursor = Cursor::new(Box::new(output_buffer));
-//        let mut output_writer : Box<dyn Write> = Box::new(output_cursor.clone());
-//
-//        crate::encrypt(input_reader, &mut output_writer, "password", "salt");
-//
-//        eprintln!("OUTPUT: {:?}", output_cursor.into_inner());
-//    }
-//}
+#[cfg(test)]
+mod main_tests {
+    use std::io::{Read, Write, Cursor};
+    use ring::rand::{SystemRandom, SecureRandom};
+
+    fn encrypt_decrypt_test(buff_size : usize) {
+        let rand = SystemRandom::new();
+
+        let mut input_buffer = vec![0; buff_size];
+
+        rand.fill(&mut input_buffer);
+
+        let mut input_reader = Cursor::new(input_buffer);
+
+        let mut encrypt_buffer = Vec::new();
+
+        crate::encrypt(&mut input_reader, &mut encrypt_buffer, "password", "salt");
+
+        let encrypt_reader = Cursor::new(encrypt_buffer);
+        let mut plaintext_buffer = Vec::new();
+
+        crate::decrypt(encrypt_reader, &mut plaintext_buffer, "password");
+
+        assert_eq!(plaintext_buffer, input_reader.into_inner());
+    }
+
+    #[test] fn test_zero_block_encrypt() { encrypt_decrypt_test(0); }
+    #[test] fn test_small_encrypt() { encrypt_decrypt_test(10); }
+    #[test] fn test_single_block_encrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE); }
+    #[test] fn test_two_blocks_encrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE * 2); }
+    #[test] fn test_ten_blocks_encrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE * 10); }
+}
