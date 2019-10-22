@@ -36,7 +36,7 @@ struct FileHeader {
 const VERSION : u64 = 1;
 const BLOCK_SIZE : usize = 4_048_576;
 
-fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, password : &str, salt : &str) -> Result<(), Box<dyn Error>> {
+fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, password : &str, salt : &str, size_file : Option<&str>) -> Result<(), Box<dyn Error>> {
     let rand = SystemRandom::new();
     let mut buff = vec![0; BLOCK_SIZE];
     let mut compress = Compressor::new();
@@ -60,6 +60,9 @@ fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, pa
     // serialize and write out the file's header
     file_header.serialize(&mut Serializer::new(&mut output_writer))?;
 
+    let mut original_size = 0;
+    let mut compressed_size = 0;
+
     loop {
         let res = input_reader.read(&mut buff);
 
@@ -75,13 +78,29 @@ fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, pa
             break;
         }
 
+        original_size += amt;
+
         let plaintext = compress.compress(&buff[0..amt], 2).or_else(|e| { error!("Error compressing input"); Err(e) })?;
 
         debug!("PT: {}", plaintext.len());
 
+        compressed_size += plaintext.len();
+
         let ciphertext = sealer.seal(plaintext);
 
         output_writer.write_all(&ciphertext).or_else(|e| { error!("Error writing to output"); Err(e) })?;
+    }
+
+    if let Some(path) = size_file {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path).or_else(|e| { error!("Error opening size info file"); Err(e) })?;
+
+        file.write(format!("original={}\n", original_size).as_bytes())?;
+        file.write(format!("compressed={}\n", compressed_size).as_bytes())?;
     }
 
     Ok( () )
@@ -179,6 +198,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .short("d")
             .long("decrypt")
             .help("Decrypts the input, and writes plaintext to the output"))
+        .arg(Arg::with_name("size-info")
+            .long("size-info")
+            .conflicts_with("decrypt")  // cannot run when decrypting
+            .value_name("FILE")
+            .help("Generate a file with size information")
+            .takes_value(true))
         .arg(Arg::with_name("v")
             .short("v")
             .multiple(true)
@@ -249,7 +274,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         debug!("SALT: {}", salt);
 
-        encrypt(input_reader, &mut output_writer, password, salt)?;
+        encrypt(input_reader, &mut output_writer, password, salt, matches.value_of("size-info"))?;
     }
 
     Ok( () )
@@ -271,7 +296,7 @@ mod main_tests {
 
         let mut encrypt_buffer = Vec::new();
 
-        crate::encrypt(&mut input_reader, &mut encrypt_buffer, "password", "salt").expect("Error encrypting");
+        crate::encrypt(&mut input_reader, &mut encrypt_buffer, "password", "salt", None).expect("Error encrypting");
 
         let encrypt_reader = Cursor::new(encrypt_buffer);
         let mut plaintext_buffer = Vec::new();
