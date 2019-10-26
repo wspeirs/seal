@@ -112,8 +112,8 @@ fn encrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), passw
             .truncate(true)
             .open(path).or_else(|e| { error!("Error opening size info file"); Err(e) })?;
 
-        file.write(format!("original={}\n", original_size).as_bytes())?;
-        file.write(format!("compressed={}\n", compressed_size).as_bytes())?;
+        file.write_all(format!("original={}\n", original_size).as_bytes())?;
+        file.write_all(format!("compressed={}\n", compressed_size).as_bytes())?;
     }
 
     Ok( () )
@@ -198,6 +198,10 @@ fn compress(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), size
 
         debug!("PT: {}", compressed_data.len());
 
+        // serialize the size of the block
+        output_writer.write_u32::<BE>(compressed_data.len() as u32).expect("Error writing block size");
+
+        // write out the compressed data
         output_writer.write_all(&compressed_data).or_else(|e| { error!("Error writing to output"); Err(e) })?;
     }
 
@@ -209,7 +213,7 @@ fn compress(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), size
             .truncate(true)
             .open(path).or_else(|e| { error!("Error opening size info file"); Err(e) })?;
 
-        file.write(format!("original={}\n", original_size).as_bytes())?;
+        file.write_all(format!("original={}\n", original_size).as_bytes())?;
     }
 
     Ok( () )
@@ -221,14 +225,14 @@ fn decompress(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write)) ->
     loop {
         let block_size = input_reader.read_u32::<BE>();
 
+        debug!("BLOCK_SIZE: {:?}", block_size);
+
         // we only get an error when we've reached the end of the buffer
         if block_size.is_err() {
             break;
         }
 
         let block_size = block_size.unwrap();
-
-        debug!("BLOCK_SIZE: {}", block_size);
 
         let mut buff = vec![0; block_size as usize];
         let res = input_reader.read_exact(&mut buff);
@@ -366,9 +370,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         debug!("SALT: {}", file_header.salt);
 
         // check to see if we're decompressing only
-        if file_header.salt == COMPRESS_STR.to_string() &&
+        if file_header.salt == COMPRESS_STR &&
             file_header.nonce_seed == COMPRESS_STR.as_bytes().to_vec() &&
-            file_header.comments[&"type".to_string()] == COMPRESS_STR.to_string() {
+            file_header.comments[&"type".to_string()] == COMPRESS_STR {
             decompress(&mut input_reader, &mut output_writer)?;
         } else {
             let mut nonce_seed = [0; 8];
@@ -399,7 +403,13 @@ mod main_tests {
     use std::io::{Cursor};
     use ring::rand::{SystemRandom, SecureRandom};
 
-    fn encrypt_decrypt_test(buff_size : usize) {
+    use std::sync::{Once};
+    static LOGGER_INIT: Once = Once::new();
+
+
+    fn encrypt_decrypt_test(buff_size: usize) {
+        LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
+
         let rand = SystemRandom::new();
 
         let mut input_buffer = vec![0; buff_size];
@@ -426,9 +436,44 @@ mod main_tests {
         assert_eq!(plaintext_buffer, input_reader.into_inner());
     }
 
-    #[test] fn test_zero_block_encrypt() { encrypt_decrypt_test(0); }
-    #[test] fn test_small_encrypt() { encrypt_decrypt_test(10); }
-    #[test] fn test_single_block_encrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE); }
-    #[test] fn test_two_blocks_encrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE * 2); }
-    #[test] fn test_ten_blocks_encrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE * 10); }
+    #[test] fn test_zero_block_encrypt_decrypt() { encrypt_decrypt_test(0); }
+    #[test] fn test_small_encrypt_decrypt() { encrypt_decrypt_test(10); }
+    #[test] fn test_single_block_encrypt_decrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE); }
+    #[test] fn test_two_blocks_encrypt_decrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE * 2); }
+    #[test] fn test_ten_blocks_encrypt_decrypt() { encrypt_decrypt_test(crate::BLOCK_SIZE * 10); }
+
+
+    fn compress_decompress_test(buff_size: usize) {
+        LOGGER_INIT.call_once(|| simple_logger::init().unwrap()); // this will panic on error
+        let rand = SystemRandom::new();
+
+        let mut input_buffer = vec![0; buff_size];
+
+        rand.fill(&mut input_buffer).expect("Error reading random");
+
+        let mut input_reader = Cursor::new(input_buffer);
+
+        let mut compress_buffer = Vec::new();
+
+        crate::compress(&mut input_reader, &mut compress_buffer, None).expect("Error compressing");
+
+        let mut compress_reader = Cursor::new(compress_buffer);
+        let mut plaintext_buffer = Vec::new();
+
+        let file_header = crate::read_file_header(&mut compress_reader).expect("Error reading file header");
+
+        assert_eq!(file_header.salt, crate::COMPRESS_STR);
+        assert_eq!(file_header.nonce_seed, crate::COMPRESS_STR.as_bytes().to_vec());
+
+        crate::decompress(&mut compress_reader, &mut plaintext_buffer).expect("Error decompressing");
+
+        assert_eq!(plaintext_buffer, input_reader.into_inner());
+    }
+
+    #[test] fn test_zero_block_compress_decompress() { compress_decompress_test(0); }
+    #[test] fn test_small_compress_decompress() { compress_decompress_test(10); }
+    #[test] fn test_single_block_compress_decompress() { compress_decompress_test(crate::BLOCK_SIZE); }
+    #[test] fn test_two_blocks_compress_decompress() { compress_decompress_test(crate::BLOCK_SIZE * 2); }
+    #[test] fn test_ten_blocks_compress_decompress() { compress_decompress_test(crate::BLOCK_SIZE * 10); }
+
 }

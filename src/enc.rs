@@ -14,7 +14,7 @@ pub(crate) struct CountingNonceSequence {
 }
 
 impl CountingNonceSequence {
-    pub fn new(nonce_seed: &[u8; 8]) -> CountingNonceSequence {
+    pub fn new(nonce_seed: [u8; 8]) -> CountingNonceSequence {
         let mut buff = [0 as u8; 12];
 
         buff[..8].copy_from_slice(&nonce_seed[..]);
@@ -40,7 +40,7 @@ impl NonceSequence for CountingNonceSequence {
 
         self.buff[8..].copy_from_slice(&tmp);
 
-        return Ok(Nonce::assume_unique_for_key(self.buff));
+        Ok(Nonce::assume_unique_for_key(self.buff))
     }
 }
 
@@ -64,7 +64,7 @@ impl Sealer {
         let unbound_key = UnboundKey::new(&AES_256_GCM, &key).or_else(|e| { error!("Error creating unbound key"); Err(e) })?;
 
         // construct the NonceSequence
-        let nonce_sequence = CountingNonceSequence::new(&nonce_seed);
+        let nonce_sequence = CountingNonceSequence::new(nonce_seed);
 
         // create the SealingKey
         let sealing_key = SealingKey::new(unbound_key, nonce_sequence);
@@ -118,7 +118,7 @@ impl Opener {
         let unbound_key = UnboundKey::new(&AES_256_GCM, &key).expect("Error creating unbound key");
 
         // construct the NonceSequence
-        let nonce_sequence = CountingNonceSequence::new(&nonce_seed);
+        let nonce_sequence = CountingNonceSequence::new(nonce_seed);
 
         // create the OpeningKey
         let opening_key = OpeningKey::new(unbound_key, nonce_sequence);
@@ -144,7 +144,7 @@ mod tests {
 
     #[test]
     fn counting_nonce() {
-        let mut cns = CountingNonceSequence::new(&[1,2,3,4,5,6,7,8]);
+        let mut cns = CountingNonceSequence::new([1,2,3,4,5,6,7,8]);
 
         cns.advance().unwrap();
         cns.advance().unwrap();

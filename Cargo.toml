@@ -15,3 +15,6 @@ serde = "1.0"
 serde_derive = "1.0"
 ring = { version="0.16", features=["std"] }
 zstd = "0.5"
+
+[dev-dependencies]
+simple_logger = "1.3"
