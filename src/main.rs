@@ -271,7 +271,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .short("p")
             .long("password")
             .value_name("PASSWORD")
-            .required(true)
             .help("The password used to encrypt or decrypt. Keep this secret!!!")
             .takes_value(true))
         .arg(Arg::with_name("salt")
@@ -334,7 +333,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let input = matches.value_of("input").unwrap_or("-");
     let output = matches.value_of("output").unwrap_or("-");
-    let password = matches.value_of("password").or_else(|| { error!("Must supply a password!"); None }).unwrap();
 
     debug!("INPUT: {}", input);
     debug!("OUTPUT: {}", output);
@@ -363,8 +361,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if matches.is_present("decrypt") {
-        info!("Attempting to expand & decrypt: {}", input);
-
         let file_header = read_file_header(&mut input_reader)?;
 
         debug!("SALT: {}", file_header.salt);
@@ -373,11 +369,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         if file_header.salt == COMPRESS_STR &&
             file_header.nonce_seed == COMPRESS_STR.as_bytes().to_vec() &&
             file_header.comments[&"type".to_string()] == COMPRESS_STR {
+
+            info!("Attempting to expand: {}", input);
+
             decompress(&mut input_reader, &mut output_writer)?;
         } else {
+            let password = matches.value_of("password").or_else(|| { error!("Must supply a password!"); None }).unwrap();
             let mut nonce_seed = [0; 8];
 
             nonce_seed.copy_from_slice(&file_header.nonce_seed);
+
+            info!("Attempting to expand & decrypt: {}", input);
 
             decrypt(&mut input_reader, &mut output_writer, password, &file_header.salt, nonce_seed)?;
         }
@@ -386,6 +388,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         compress(&mut input_reader, &mut output_writer, matches.value_of("size-info"))?;
     } else {
+        let password = matches.value_of("password").or_else(|| { error!("Must supply a password!"); None }).unwrap();
+
         info!("Attempting to encrypt: {}", input);
 
         let salt = matches.value_of("salt").or_else(|| { error!("Must supply salt!"); None }).unwrap();
