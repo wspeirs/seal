@@ -36,7 +36,7 @@ struct FileHeader {
 const VERSION : u64 = 1;
 const BLOCK_SIZE : usize = 4_048_576;
 
-fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, password : &str, salt : &str, size_file : Option<&str>) -> Result<(), Box<dyn Error>> {
+fn encrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), password : &str, salt : &str, size_file : Option<&str>) -> Result<(), Box<dyn Error>> {
     let rand = SystemRandom::new();
     let mut buff = vec![0; BLOCK_SIZE];
     let mut compress = Compressor::new();
@@ -58,7 +58,7 @@ fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, pa
     output_writer.write_u64::<BE>(VERSION)?;
 
     // serialize and write out the file's header
-    file_header.serialize(&mut Serializer::new(&mut output_writer))?;
+    file_header.serialize(&mut Serializer::new(&mut (*output_writer)))?;
 
     let mut original_size = 0;
     let mut compressed_size = 0;
@@ -106,7 +106,7 @@ fn encrypt(mut input_reader : impl Read, mut output_writer : &mut impl Write, pa
     Ok( () )
 }
 
-fn decrypt(mut input_reader : impl Read, output_writer : &mut impl Write, password : &str) -> Result<(), Box<dyn Error>> {
+fn decrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), password : &str) -> Result<(), Box<dyn Error>> {
     // read in the version of the file
     let version = input_reader.read_u64::<BE>().or_else(|e| { error!("Unable to read version"); Err(e) })?;
 
@@ -116,7 +116,7 @@ fn decrypt(mut input_reader : impl Read, output_writer : &mut impl Write, passwo
     }
 
     // read in the file header
-    let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut input_reader)).expect("Error reading file header");
+    let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut (*input_reader))).expect("Error reading file header");
 
     debug!("SALT: {}", file_header.salt);
 
@@ -241,7 +241,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     debug!("OUTPUT: {}", output);
 
     // construct the input reader from either STDIN or from the file
-    let input_reader : Box<dyn BufRead> = if input == "-" {
+    let mut input_reader: Box<dyn BufRead> = if input == "-" {
         Box::new(BufReader::new(stdin()))
     } else {
         Box::new(BufReader::new(fs::OpenOptions::new()
@@ -252,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // construct the output writer from either STDOUT or from the file
-    let mut output_writer : Box<dyn Write> = if output == "-" {
+    let mut output_writer: Box<dyn Write> = if output == "-" {
         Box::new(BufWriter::new(stdout()))
     } else {
         Box::new(BufWriter::new(fs::OpenOptions::new()
@@ -266,7 +266,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if matches.is_present("decrypt") {
         info!("Attempting to decrypt: {}", input);
 
-        decrypt(input_reader, &mut output_writer, password)?;
+        decrypt(&mut input_reader, &mut output_writer, password)?;
     } else {
         info!("Attempting to encrypt: {}", input);
 
@@ -274,7 +274,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         debug!("SALT: {}", salt);
 
-        encrypt(input_reader, &mut output_writer, password, salt, matches.value_of("size-info"))?;
+        encrypt(&mut input_reader, &mut output_writer, password, salt, matches.value_of("size-info"))?;
     }
 
     Ok( () )
@@ -298,10 +298,10 @@ mod main_tests {
 
         crate::encrypt(&mut input_reader, &mut encrypt_buffer, "password", "salt", None).expect("Error encrypting");
 
-        let encrypt_reader = Cursor::new(encrypt_buffer);
+        let mut encrypt_reader = Cursor::new(encrypt_buffer);
         let mut plaintext_buffer = Vec::new();
 
-        crate::decrypt(encrypt_reader, &mut plaintext_buffer, "password").expect("Error decrypting");
+        crate::decrypt(&mut encrypt_reader, &mut plaintext_buffer, "password").expect("Error decrypting");
 
         assert_eq!(plaintext_buffer, input_reader.into_inner());
     }
