@@ -33,8 +33,22 @@ struct FileHeader {
     comments: HashMap<String, String>
 }
 
-const VERSION : u64 = 1;
-const BLOCK_SIZE : usize = 4_048_576;
+const VERSION: u64 = 1;
+const BLOCK_SIZE: usize = 4_048_576;
+const COMPRESS_STR: &str = "COMPRESSED_ONLY";
+
+fn read_file_header(input_reader: &mut (dyn Read)) -> Result<FileHeader, Box<dyn Error>> {
+    // read in the version of the file
+    let version = input_reader.read_u64::<BE>().or_else(|e| { error!("Unable to read version"); Err(e) })?;
+
+    if version != VERSION {
+        error!("Unsupported file version: {}", version);
+        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unsupported file version")));
+    }
+
+    // read in the file header
+    Ok(Deserialize::deserialize(&mut Deserializer::new(&mut (*input_reader))).expect("Error reading file header"))
+}
 
 fn encrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), password : &str, salt : &str, size_file : Option<&str>) -> Result<(), Box<dyn Error>> {
     let rand = SystemRandom::new();
@@ -50,7 +64,6 @@ fn encrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), passw
         salt: String::from(salt),
         nonce_seed: nonce_seed.to_vec(),
         comments: HashMap::new()
-
     };
 
     // write out the version
@@ -106,26 +119,9 @@ fn encrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), passw
     Ok( () )
 }
 
-fn decrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), password : &str) -> Result<(), Box<dyn Error>> {
-    // read in the version of the file
-    let version = input_reader.read_u64::<BE>().or_else(|e| { error!("Unable to read version"); Err(e) })?;
-
-    if version != VERSION {
-        error!("Unsupported file version: {}", version);
-        return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unsupported file version")));
-    }
-
-    // read in the file header
-    let file_header : FileHeader = Deserialize::deserialize(&mut Deserializer::new(&mut (*input_reader))).expect("Error reading file header");
-
-    debug!("SALT: {}", file_header.salt);
-
-    let mut nonce_seed = [0; 8];
-
-    nonce_seed.copy_from_slice(file_header.nonce_seed.as_slice());
-
-    let mut opener = Opener::new(password, file_header.salt.as_bytes(), nonce_seed)?;
-    let mut decompress = Decompressor::new();
+fn decrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), password: &str, salt: &str, nonce_seed: [u8; 8]) -> Result<(), Box<dyn Error>> {
+    let mut opener = Opener::new(password, salt.as_bytes(), nonce_seed)?;
+    let mut decompressor = Decompressor::new();
 
     loop {
         let block_size = input_reader.read_u32::<BE>();
@@ -150,13 +146,105 @@ fn decrypt(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), passw
 
         debug!("PT: {}", plaintext.len());
 
-        let plaintext = decompress.decompress(&plaintext, BLOCK_SIZE).or_else(|e| { error!("Error decompressing input"); Err(e) })?;
+        let plaintext = decompressor.decompress(&plaintext, BLOCK_SIZE).or_else(|e| { error!("Error decompressing input"); Err(e) })?;
 
         output_writer.write_all(&plaintext).or_else(|e| { error!("Error writing to output"); Err(e) })?;
     }
 
     Ok( () )
 }
+
+fn compress(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write), size_file : Option<&str>) -> Result<(), Box<dyn Error>> {
+    let mut buff = vec![0; BLOCK_SIZE];
+    let mut compress = Compressor::new();
+
+    let mut comments = HashMap::new();
+
+    comments.insert("type".to_string(), COMPRESS_STR.to_string());
+
+    let file_header = FileHeader {
+        salt: COMPRESS_STR.to_string(),
+        nonce_seed: COMPRESS_STR.as_bytes().to_vec(),
+        comments: comments
+    };
+
+    // write out the version
+    // this is kept outside the FileHeader so we can read it in an independent way
+    output_writer.write_u64::<BE>(VERSION)?;
+
+    // serialize and write out the file's header
+    file_header.serialize(&mut Serializer::new(&mut (*output_writer)))?;
+
+    let mut original_size = 0;
+
+    loop {
+        let res = input_reader.read(&mut buff);
+
+        if res.is_err() {
+            break;
+        }
+
+        let amt = res.unwrap();
+
+        debug!("AMT: {}", amt);
+
+        if amt == 0 {
+            break;
+        }
+
+        original_size += amt;
+
+        let compressed_data = compress.compress(&buff[0..amt], 2).or_else(|e| { error!("Error compressing input"); Err(e) })?;
+
+        debug!("PT: {}", compressed_data.len());
+
+        output_writer.write_all(&compressed_data).or_else(|e| { error!("Error writing to output"); Err(e) })?;
+    }
+
+    if let Some(path) = size_file {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path).or_else(|e| { error!("Error opening size info file"); Err(e) })?;
+
+        file.write(format!("original={}\n", original_size).as_bytes())?;
+    }
+
+    Ok( () )
+}
+
+fn decompress(input_reader: &mut (dyn Read), output_writer: &mut (dyn Write)) -> Result<(), Box<dyn Error>> {
+    let mut decompress = Decompressor::new();
+
+    loop {
+        let block_size = input_reader.read_u32::<BE>();
+
+        // we only get an error when we've reached the end of the buffer
+        if block_size.is_err() {
+            break;
+        }
+
+        let block_size = block_size.unwrap();
+
+        debug!("BLOCK_SIZE: {}", block_size);
+
+        let mut buff = vec![0; block_size as usize];
+        let res = input_reader.read_exact(&mut buff);
+
+        if res.is_err() {
+            break;
+        }
+
+        let plaintext = decompress.decompress(&buff, BLOCK_SIZE).or_else(|e| { error!("Error decompressing input"); Err(e) })?;
+
+        output_writer.write_all(&plaintext).or_else(|e| { error!("Error writing to output"); Err(e) })?;
+    }
+
+    Ok( () )
+}
+
 
 fn main() -> Result<(), Box<dyn Error>> {
     let matches = App::new("Seal")
@@ -198,6 +286,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .short("d")
             .long("decrypt")
             .help("Decrypts the input, and writes plaintext to the output"))
+        .arg(Arg::with_name("compress")
+            .conflicts_with("encrypt")
+            .conflicts_with("password")
+            .conflicts_with("salt")
+            .short("c")
+            .long("compress")
+            .help("Only compress the input, NO ENCRYPTION"))
         .arg(Arg::with_name("size-info")
             .long("size-info")
             .conflicts_with("decrypt")  // cannot run when decrypting
@@ -264,9 +359,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     if matches.is_present("decrypt") {
-        info!("Attempting to decrypt: {}", input);
+        info!("Attempting to expand & decrypt: {}", input);
 
-        decrypt(&mut input_reader, &mut output_writer, password)?;
+        let file_header = read_file_header(&mut input_reader)?;
+
+        debug!("SALT: {}", file_header.salt);
+
+        // check to see if we're decompressing only
+        if file_header.salt == COMPRESS_STR.to_string() &&
+            file_header.nonce_seed == COMPRESS_STR.as_bytes().to_vec() &&
+            file_header.comments[&"type".to_string()] == COMPRESS_STR.to_string() {
+            decompress(&mut input_reader, &mut output_writer)?;
+        } else {
+            let mut nonce_seed = [0; 8];
+
+            nonce_seed.copy_from_slice(&file_header.nonce_seed);
+
+            decrypt(&mut input_reader, &mut output_writer, password, &file_header.salt, nonce_seed)?;
+        }
+    } else if matches.is_present("compress") {
+        info!("Attempting to ONLY compress: {}", input);
+
+        compress(&mut input_reader, &mut output_writer, matches.value_of("size-info"))?;
     } else {
         info!("Attempting to encrypt: {}", input);
 
@@ -282,7 +396,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod main_tests {
-    use std::io::{Read, Write, Cursor};
+    use std::io::{Cursor};
     use ring::rand::{SystemRandom, SecureRandom};
 
     fn encrypt_decrypt_test(buff_size : usize) {
@@ -301,7 +415,13 @@ mod main_tests {
         let mut encrypt_reader = Cursor::new(encrypt_buffer);
         let mut plaintext_buffer = Vec::new();
 
-        crate::decrypt(&mut encrypt_reader, &mut plaintext_buffer, "password").expect("Error decrypting");
+        let file_header = crate::read_file_header(&mut encrypt_reader).expect("Error reading file header");
+
+        let mut nonce_seed = [0; 8];
+
+        nonce_seed.copy_from_slice(&file_header.nonce_seed);
+
+        crate::decrypt(&mut encrypt_reader, &mut plaintext_buffer, "password", &file_header.salt, nonce_seed).expect("Error decrypting");
 
         assert_eq!(plaintext_buffer, input_reader.into_inner());
     }
